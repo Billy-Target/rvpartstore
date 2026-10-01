@@ -1,0 +1,25 @@
+# Pinned for Python 3.9 (deploy + dev machines both run 3.9.0).
+# The tracking-path modules (rvpartstore package __init__, config, shopify_client,
+# db, tracking) use ONLY stdlib + requests + mysql-connector-python — see R3 in
+# the design spec. Everything else below is for the upload job / google_merchant /
+# amazon_sp_api, which are never imported on the tracking path.
+
+requests==2.31.0
+mysql-connector-python==8.0.33
+
+# pricing.py / snapshot.py / sources.py / orders.py — pandas 1.5.x is fine for
+# these (they are NOT on the tracking import path).
+pandas==1.5.3
+numpy==1.23.5
+openpyxl==3.1.2
+
+# google_sheets.py / google_merchant.py
+google-api-python-client==2.90.0
+google-auth==2.22.0
+google-auth-httplib2==0.1.0
+google-auth-oauthlib==1.0.0
+
+# amazon_sp_api.py
+python-amazon-sp-api==0.18.0
+boto3==1.26.163
+botocore==1.29.163
