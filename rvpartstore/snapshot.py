@@ -24,8 +24,10 @@ BULK_QUERY = """
         price
         compareAtPrice
         inventoryPolicy
-        product { id }
-        metafield(namespace: "custom", key: "vendorname") { id value }
+        product {
+          id
+          metafield(namespace: "custom", key: "vendorname") { id value }
+        }
         inventoryItem {
           id
           tracked
@@ -84,7 +86,9 @@ def parse_snapshot_rows(rows):
                 if q.get("name") == "available":
                     quantity = int(q.get("quantity") or 0)
 
-        metafield = node.get("metafield")
+        # vendorname is a PRODUCT metafield (set_vendorname writes it on the
+        # product); fall back to a variant-level one for older payload shapes.
+        metafield = (node.get("product") or {}).get("metafield") or node.get("metafield")
         barcode = node.get("barcode")
         upc = barcode.strip() if isinstance(barcode, str) and barcode.strip() else None
 

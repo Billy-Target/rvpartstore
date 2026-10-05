@@ -120,7 +120,8 @@ python main.py brakex_orders        单独拉一次 Brakex 订单（跟 upload �
 拿 token 是两条不同的认证路径，但重试/节流/分页逻辑完全一样。Brakex 的 401 不会重试
 （没有 client_id/secret 可以用来换新 token），直接报错。
 
-`BRAKEX_ENABLED`（默认 `true`）控制开关：
+`BRAKEX_ENABLED`（代码默认 `true`）控制开关。**新旧两家店并行期间部署机上设为
+`false`**——Brakex 继续由旧任务拉（见下方上线 checklist）：
 
 - `true`：`upload` 的最后一步、以及独立的 `python main.py brakex_orders`，都会去拉
   Brakex 未发货订单写入 `BRAKEX_ORDER_TABLE`（默认 `shopify_brakex_order`，28 列，
@@ -139,17 +140,29 @@ Brakex 跟 RV 共用 `TxnID`/`riskLevel`/`current_quantity` 兜底/`shipping_add
   一个库存扣减，但旧代码里这个扣减从来没真正生效过，反而只要有一个 product 没映射
   就会让整个 run 崩掉。本项目不做这个查询，也不做这个扣减。
 
-## 割接（cut-over）checklist
+## 上线 checklist（新旧两家 RV Marines 店并行）
 
-1. 先停掉旧店（`rvmarines_main.py` 对应的 Task）的 Task Scheduler 任务 ——
-   **这是老项目最后一个还在跑的任务**，Brakex 拉单已经搬到本项目里了
-   （见上面"Brakex 订单拉取"），所以这里是老项目**彻底停用**，不再是旧任务停了
-   但 Brakex 还需要跟进的遗留问题。
-2. `python main.py enable_tracking --apply`，把新店所有 `tracked=false` 的 variant
-   改成 `tracked=true`（否则库存没法正常同步）。
-3. 先跑一次 `python main.py upload --dry-run`，检查 `data/dry_run/` 下的 CSV
-   （价格、库存、供应商、订单）看着都合理，再跑一次**不带** `--dry-run`（且大概率要
-   加 `--force-breaker`，见上面熔断器说明）的正式 upload。
+2026-10 决定：**旧店不下线**，旧任务（francis-shopify 的 `rv_marines_upload`）照常
+运行，继续负责旧店的价格/库存/订单、Brakex 订单拉取和 Google Merchant。本项目只负责
+新店。所以：
+
+- 部署机上本项目的 `.env` 设 `BRAKEX_ENABLED=false`（Brakex 继续由旧任务拉，避免
+  两边同时拉同一家店）。
+- 两个每小时任务**错开时间**：旧任务整点跑，本项目建议每小时的 :30 跑。两边都会向
+  Amazon 请求同一种报表，错开可以避免同时排队、互相拖慢。
+- 两家店的订单都写进同一张 `shopify_rvmarines_order`，`StoreType` 都是
+  `shopifyca_rv`，下游下单/发货代码不用改；区分两家店看 TxnID：新店 `RVM_SP_N…`，
+  旧店 `RVM_SP_…`（不带 N）。
+
+已完成（2026-10-02）：`enable_tracking --apply`（25,179 个全部 tracked）和第一次
+正式 `upload --force-breaker`。剩下的步骤：
+
+1. 部署到部署机（复制项目、建 venv、拷 `.env`/`token.json`/`credentials.json`，
+   改路径；`.env` 里 `DRY_RUN=false`、`BRAKEX_ENABLED=false`），先跑一次
+   `python main.py upload --dry-run` 确认在那台机器上能连上所有数据源。
+2. 给新项目排 Task Scheduler：`upload` 每小时 :30（"如果任务已在运行，不启动新实例"），
+   `tracking_audit` 每天一次。
+3. 在新店下一笔测试订单（见下方"先下单测试"），确认能拉到并写入数据库。
 4. 切 `tracking_automation` 的 import：把
    ```python
    from shopify_tracking import ship_orders
@@ -160,13 +173,12 @@ Brakex 跟 RV 共用 `TxnID`/`riskLevel`/`current_quantity` 兜底/`shipping_add
    sys.path.insert(0, r"C:\Users\billy\PycharmProjects\rvpartstore")
    from rvpartstore.tracking import ship_orders
    ```
-   这是**唯一**需要动 `tracking_automation` 代码的地方，而且只在割接当天改一次。
-   旧店的在途订单（TxnID 不是 `RVM_SP_N` 开头）会被自动转发给
-   `tracking_automation` 自己原有的 `shopify_tracking.ship_orders`（R1/V1），所以
-   旧店未发完的订单在切换后仍然能正常发货。
-5. 给新项目排 Task Scheduler：`upload`（每小时）+ `tracking_audit`（每天）。
+   这是**唯一**需要动 `tracking_automation` 代码的地方，只改一次。改完以后
+   `RVM_SP_N` 开头的订单回传到新店，其余（旧店 `RVM_SP_…`）自动转给
+   `tracking_automation` 自己原有的 `shopify_tracking.ship_orders`（R1/V1），两家店
+   长期并行都靠这个分流。
 
-割接前后还要注意：
+上线前后还要注意：
 
 - **先下单测试**：新店目前还没有真实订单跑过，`orders.py` 里对"保护客户数据"
   （shipping_address 缺失）的处理（R10）没法在没有真实订单前验证，割接前务必先在
@@ -174,10 +186,10 @@ Brakex 跟 RV 共用 `TxnID`/`riskLevel`/`current_quantity` 兜底/`shipping_add
 - 4 个重复条码（duplicate barcode）会同时显示供应商库存，这是已知问题，不在本项目
   处理范围内。
 - UPC-exception 名单里的商品完全不会被本项目触碰（价格、库存都保持它们当前的值）。
-- 旧店的 API app（client id/secret）**要保留着不要删**，直到旧店所有在途订单都已
-  发货完毕（新旧两条 tracking 路径都可能还需要用到）。
-- 关掉旧店前，建议先把旧店设成"需要密码访问"或者把它的库存清零，避免旧店继续被
-  下单（老代码停了但店铺本身还开着的话，客人还是能在旧店下单）。
+- 旧店的 API app（client id/secret）**不能删**：旧店订单的 tracking 回传
+  （`shopify_tracking.ship_orders`）一直要用。
+- **同一份供应商库存会同时显示在两家店（以及 Amazon）**：库存最多只显示 6，但最后
+  几件仍可能被两家店同时卖掉。RMA 自有库存（IB）数量通常很少，风险更明显。
 
 ## UPC-less 商品（option b）
 

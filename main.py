@@ -54,6 +54,11 @@ def _in_quiet_window(settings):
     return now >= start or now < end
 
 
+def _inserted_label(settings):
+    """Order pulls count rows they insert; under DRY_RUN nothing is inserted."""
+    return "would_insert" if settings.dry_run else "inserted"
+
+
 def _step_failed_summary():
     """Placeholder returned for an R6 write step that raised before it could
     produce its own attempted/succeeded/failed counts (item 9)."""
@@ -98,7 +103,7 @@ def _run_brakex(settings):
     )
     db = db_mod.Db(settings)
     summary = brakex_orders_mod.pull_brakex_open_orders(client, db, settings)
-    log.info("brakex orders: inserted=%d skipped=%d errors=%d",
+    log.info("brakex orders: %s=%d skipped=%d errors=%d", _inserted_label(settings),
              summary["inserted"], summary["skipped"], summary["errors"])
     return summary
 
@@ -173,7 +178,8 @@ def _upload_rv(settings, force_breaker):
     order_summary = {"inserted": 0, "skipped": 0, "errors": 0}
     try:
         order_summary = orders_mod.pull_open_orders(client, db, settings, snap)
-        log.info("orders: inserted=%d errors=%d", order_summary["inserted"], order_summary["errors"])
+        log.info("orders: %s=%d skipped=%d errors=%d", _inserted_label(settings),
+                 order_summary["inserted"], order_summary["skipped"], order_summary["errors"])
     except Exception:
         log.exception("pull_open_orders failed")
 
@@ -267,10 +273,10 @@ def _upload_rv(settings, force_breaker):
 
     log.info(
         "summary: variants=%d no_upc=%d zero_price_guard=%d prices=%s inventory_zero=%s inventory_positive=%s "
-        "vendors=%s google=%s orders_inserted=%d orders_errors=%d",
+        "vendors=%s google=%s orders_%s=%d orders_errors=%d",
         len(snap.index), changeset.no_upc_count, changeset.zero_price_count,
         price_summary, zero_summary, positive_summary, vendor_summary, google_summary,
-        order_summary["inserted"], order_summary["errors"],
+        _inserted_label(settings), order_summary["inserted"], order_summary["errors"],
     )
 
 

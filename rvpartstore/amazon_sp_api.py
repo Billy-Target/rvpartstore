@@ -18,29 +18,27 @@ def _credentials(settings):
     )
 
 
-def create_amazon_report(settings, out_path, poll_s=2, max_polls=150):
+def create_amazon_report(settings, out_path, poll_s=5, max_polls=360):
     """Request GET_MERCHANT_LISTINGS_ALL_DATA and download it to out_path.
-    Bounded polling (max_polls * poll_s seconds) instead of the old
-    `while ...: continue` with no cap."""
+    Bounded polling (max_polls * poll_s seconds, 30 min) instead of the old
+    `while ...: continue` with no cap; the report can take >5 min to build."""
     reports = Reports(credentials=_credentials(settings), marketplace=Marketplaces.CA)
-    reports.create_report(reportType=ReportType.GET_MERCHANT_LISTINGS_ALL_DATA, reportOptions={"custom": "true"})
-    time.sleep(15)
+    created = reports.create_report(
+        reportType=ReportType.GET_MERCHANT_LISTINGS_ALL_DATA, reportOptions={"custom": "true"})
+    # Use our own report id (the old code took the first IN_PROGRESS report of
+    # this type, which can be another job's request for the same report).
+    report_id = created.payload.get("reportId")
+    if not report_id:
+        raise RuntimeError("amazon report: create_report returned no reportId: %s" % created.payload)
 
-    get_reports = reports.get_reports(
-        reportTypes=["GET_MERCHANT_LISTINGS_ALL_DATA"], processingStatuses=["IN_PROGRESS"]
-    )
-    pending = get_reports.payload.get("reports")
-    if not pending:
-        raise RuntimeError("amazon report: no IN_PROGRESS report found after create_report")
-    report_id = pending[0]["reportId"]
-
+    status = None
     for _ in range(max_polls):
         status = reports.get_report(report_id).payload.get("processingStatus")
-        if status != "IN_PROGRESS":
+        if status not in ("IN_QUEUE", "IN_PROGRESS"):
             break
         time.sleep(poll_s)
     else:
-        raise RuntimeError("amazon report %s still IN_PROGRESS after %ds" % (report_id, max_polls * poll_s))
+        raise RuntimeError("amazon report %s still %s after %ds" % (report_id, status, max_polls * poll_s))
 
     get_report = reports.get_report(report_id)
     if get_report.payload.get("processingStatus") != "DONE":

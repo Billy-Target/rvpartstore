@@ -5,6 +5,7 @@ import datetime
 import json
 import logging
 import os
+import uuid
 
 import pandas
 
@@ -117,8 +118,11 @@ def set_inventory(client, settings, inv_df, batch_size=100):
         _write_dry_run_csv(settings, "inventory", inv_df)
         return _summary(len(inv_df.index), 0, 0)
 
-    mutation = """mutation inventorySetQuantities($input: InventorySetQuantitiesInput!) {
-        inventorySetQuantities(input: $input) {
+    # 2026-07: inventory mutations require the @idempotent directive. A fresh
+    # key per request; the client's own retries resend the same variables, so
+    # a retried request reuses its key.
+    mutation = """mutation inventorySetQuantities($input: InventorySetQuantitiesInput!, $idempotencyKey: String!) {
+        inventorySetQuantities(input: $input) @idempotent(key: $idempotencyKey) {
             userErrors { field message }
         }
     }"""
@@ -145,7 +149,7 @@ def set_inventory(client, settings, inv_df, batch_size=100):
             "name": "available",
             "reason": "correction",
             "quantities": [quantity_entry(row) for row in batch],
-        }}
+        }, "idempotencyKey": str(uuid.uuid4())}
         attempted += len(batch)
         try:
             result = client.graphql(mutation, variables)
@@ -168,7 +172,7 @@ def set_inventory(client, settings, inv_df, batch_size=100):
                 "name": "available",
                 "reason": "correction",
                 "quantities": [quantity_entry(row)],
-            }}
+            }, "idempotencyKey": str(uuid.uuid4())}
             try:
                 single_result = client.graphql(mutation, single_variables)
             except ShopifyError:
@@ -238,7 +242,7 @@ def set_tracked(client, settings, inventory_item_ids):
         _write_dry_run_csv(settings, "enable_tracking", df)
         return _summary(len(inventory_item_ids), 0, 0)
 
-    mutation = """mutation inventoryItemUpdate($id: ID!, $input: InventoryItemUpdateInput!) {
+    mutation = """mutation inventoryItemUpdate($id: ID!, $input: InventoryItemInput!) {
         inventoryItemUpdate(id: $id, input: $input) {
             inventoryItem { id tracked }
             userErrors { field message }

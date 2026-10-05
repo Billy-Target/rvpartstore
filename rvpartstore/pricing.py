@@ -113,12 +113,15 @@ def _get_changed_items(df, google_enabled):
     # "price: UPC path wins" would let this spurious UPC-side "change" clobber
     # a real RMA-sourced price for RMA-only (not-in-vendor-feed) variants —
     # found via smoke-testing, not an explicit spec id.
+    # Once filled, compareAtPrice only counts as changed beyond the same 1%
+    # threshold as price (an absolute 0.01 re-wrote hundreds of variants every
+    # hour on tiny Amazon-repricer drift — seen on the first live run).
     feed_matched = df["feed_matched"] if "feed_matched" in df.columns else True
     cap_old = df["store_compare_at_price"]
     cap_new = df["compareAtPrice"]
     cap_differs = feed_matched & (
         (cap_old.isna() != cap_new.isna())
-        | ((~cap_old.isna()) & (~cap_new.isna()) & ((cap_old - cap_new).abs() > 0.01))
+        | ((~cap_old.isna()) & (~cap_new.isna()) & (((cap_old - cap_new).abs() / cap_old.abs()) > 0.01))
     )
 
     price_df = df.loc[price_mask | cap_differs].copy()
