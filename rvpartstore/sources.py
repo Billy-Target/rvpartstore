@@ -67,24 +67,49 @@ def load_merged_feed(db):
     return total_df
 
 
+AMAZON_REPORT_MAX_AGE_S = 3 * 60 * 60
+
+
+def _report_age_s(path):
+    """Age in seconds of a usable (existing, non-empty) report file, else None."""
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return None
+    return time.time() - os.path.getmtime(path)
+
+
 def load_amazon_report(settings, download=True):
-    """If download, run the ported create_amazon_report() writing to
-    AMAZON_REPORT_PATH; read with utf-8-sig then ISO-8859-1 fallback,
-    converters={'seller-sku': str}. R7: raise GuardError if the download
-    raises, or the file is missing/empty/older than 3h after download."""
+    """If download, run the ported create_amazon_report() into a temp file and
+    swap it into AMAZON_REPORT_PATH only once complete; read with utf-8-sig then
+    ISO-8859-1 fallback, converters={'seller-sku': str}.
+
+    If the download fails (Amazon sometimes leaves the report queued for a long
+    time), fall back to the last successfully downloaded report as long as it is
+    no older than 3h; only then raise GuardError (R7: abort, no writes)."""
     path = settings.amazon_report_path
     if download:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        tmp_path = path + ".tmp"
         try:
-            create_amazon_report(settings, path)
+            create_amazon_report(settings, tmp_path)
+            if _report_age_s(tmp_path) is None:
+                raise RuntimeError("downloaded report is missing/empty")
+            os.replace(tmp_path, path)
         except Exception as exc:
-            raise GuardError("amazon report download failed: {}".format(exc))
+            age_s = _report_age_s(path)
+            if age_s is None or age_s > AMAZON_REPORT_MAX_AGE_S:
+                raise GuardError("amazon report download failed and no report from the last 3h to fall "
+                                 "back on: {}".format(exc))
+            log.warning("amazon report download failed (%s); using previous report from %.0f min ago",
+                        exc, age_s / 60)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
-        if not os.path.exists(path) or os.path.getsize(path) == 0:
-            raise GuardError("amazon report missing/empty after download: {}".format(path))
-        age_s = time.time() - os.path.getmtime(path)
-        if age_s > 3 * 60 * 60:
-            raise GuardError("amazon report is older than 3h after download: {}".format(path))
+        age_s = _report_age_s(path)
+        if age_s is None:
+            raise GuardError("amazon report missing/empty: {}".format(path))
+        if age_s > AMAZON_REPORT_MAX_AGE_S:
+            raise GuardError("amazon report is older than 3h: {}".format(path))
 
     try:
         return pandas.read_table(path, encoding="utf-8-sig", low_memory=False, converters={"seller-sku": str})

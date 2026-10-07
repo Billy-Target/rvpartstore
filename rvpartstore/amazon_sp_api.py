@@ -18,10 +18,11 @@ def _credentials(settings):
     )
 
 
-def create_amazon_report(settings, out_path, poll_s=5, max_polls=360):
+def create_amazon_report(settings, out_path, poll_s=5, max_polls=120):
     """Request GET_MERCHANT_LISTINGS_ALL_DATA and download it to out_path.
-    Bounded polling (max_polls * poll_s seconds, 30 min) instead of the old
-    `while ...: continue` with no cap; the report can take >5 min to build."""
+    Bounded polling (max_polls * poll_s seconds, 10 min) instead of the old
+    `while ...: continue` with no cap; the report can take >5 min to build.
+    On timeout the caller falls back to the previous report (sources.py)."""
     reports = Reports(credentials=_credentials(settings), marketplace=Marketplaces.CA)
     created = reports.create_report(
         reportType=ReportType.GET_MERCHANT_LISTINGS_ALL_DATA, reportOptions={"custom": "true"})
