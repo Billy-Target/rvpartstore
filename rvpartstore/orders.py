@@ -70,6 +70,17 @@ def _promise_date(order_date, vendor, today):
     return (order_date + datetime.timedelta(days=fulfillment_time)).strftime("%Y-%m-%d")
 
 
+def _order_shipping(order_json):
+    """Sum of shipping_lines discounted_price (falls back to price)."""
+    total = 0.0
+    for line in order_json.get("shipping_lines") or []:
+        amount = line.get("discounted_price")
+        if amount is None:
+            amount = line.get("price")
+        total += float(amount or 0)
+    return round(total, 2)
+
+
 def build_order_rows(order_json, fo_info, vendor_lookup, today, txn_prefix="RVM_SP_N", store_type="shopifyca_rv"):
     """Pure. order_json: REST order dict. fo_info: {'risk_level', 'fulfillment_order_ids',
     'line_item_map': {sku: fulfillmentOrderLineItemId}}. vendor_lookup: {product_id: vendor_code_or_None}.
@@ -94,6 +105,10 @@ def build_order_rows(order_json, fo_info, vendor_lookup, today, txn_prefix="RVM_
     fulfillment_order_id = "|".join(fo_info.get("fulfillment_order_ids") or [])
     line_item_map = fo_info.get("line_item_map") or {}
     risk_level = fo_info.get("risk_level") or "LOW"
+    # Whole-order shipping (after shipping discounts) goes on the FIRST emitted
+    # row only, so summing Items_Shipping per TxnID never double-counts. The
+    # old store (francis-shopify) still writes 0 — new store only.
+    order_shipping = _order_shipping(order_json)
 
     rows = []
     for item in order_json.get("line_items", []):
@@ -136,7 +151,7 @@ def build_order_rows(order_json, fo_info, vendor_lookup, today, txn_prefix="RVM_
             "Items_Desc": item.get("title"),
             "Items_Quantity": current_quantity,
             "Items_Amount": item_amount,
-            "Items_Shipping": 0,
+            "Items_Shipping": 0 if rows else order_shipping,
             "StoreType": store_type,
             "company": company,
             "To_Name": to_name,

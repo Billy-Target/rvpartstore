@@ -476,3 +476,39 @@ def test_fetch_order_detail_entirely_null_data_response_raises_shopify_error():
     client = _ScriptedGraphqlClient([None, None])
     with pytest.raises(ShopifyError):
         _fetch_order_detail(client, "1")
+
+
+# ---------------------------------------------------------------------------
+# Items_Shipping: whole-order shipping on the first emitted row only
+# ---------------------------------------------------------------------------
+
+def test_items_shipping_defaults_to_zero_without_shipping_lines():
+    rows = build_order_rows(_order_json(), _fo_info(), {}, datetime.date(2024, 1, 1))
+    assert rows[0]["Items_Shipping"] == 0
+
+
+def test_items_shipping_uses_discounted_price_summed_over_lines():
+    order = _order_json(shipping_lines=[
+        {"price": "15.00", "discounted_price": "12.00"},
+        {"price": "3.50"},
+    ])
+    rows = build_order_rows(order, _fo_info(), {}, datetime.date(2024, 1, 1))
+    assert rows[0]["Items_Shipping"] == 15.5
+
+
+def test_items_shipping_only_on_first_emitted_row():
+    order = _order_json(
+        shipping_lines=[{"price": "12.00", "discounted_price": "12.00"}],
+        line_items=[
+            {"id": 1, "sku": "SKU-A", "quantity": 1, "current_quantity": 0,
+             "price": "10.00", "title": "Gone", "product_id": 1, "discount_allocations": []},
+            {"id": 2, "sku": "SKU-B", "quantity": 1, "current_quantity": 1,
+             "price": "10.00", "title": "B", "product_id": 2, "discount_allocations": []},
+            {"id": 3, "sku": "SKU-C", "quantity": 1, "current_quantity": 1,
+             "price": "10.00", "title": "C", "product_id": 3, "discount_allocations": []},
+        ],
+    )
+    fo = _fo_info(line_item_map={"SKU-A": "LI1", "SKU-B": "LI2", "SKU-C": "LI3"})
+    rows = build_order_rows(order, fo, {}, datetime.date(2024, 1, 1))
+    assert [r["Items_Name"] for r in rows] == ["SKU-B", "SKU-C"]
+    assert [r["Items_Shipping"] for r in rows] == [12.0, 0]
