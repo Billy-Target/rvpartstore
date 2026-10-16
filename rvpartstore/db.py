@@ -70,3 +70,20 @@ def run_write(conn, query, params=None, many=False):
         return cursor.rowcount
     finally:
         cursor.close()
+
+
+def replace_all_rows(conn, delete_query, insert_query, rows):
+    """Snapshot replace in ONE transaction: DELETE then INSERT (executemany),
+    commit once at the end, rollback on any error (run_write commits per call,
+    so it can't be used for this). Returns the number of rows inserted."""
+    cursor = conn.cursor()
+    try:
+        cursor.execute(delete_query)
+        cursor.executemany(insert_query, rows)
+        conn.commit()
+        return len(rows)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cursor.close()

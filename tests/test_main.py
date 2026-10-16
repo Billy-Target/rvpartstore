@@ -225,3 +225,73 @@ def test_standalone_brakex_job_noop_when_disabled(monkeypatch):
     monkeypatch.setattr(main_mod, "_run_brakex", must_not_be_called)
 
     main_mod.brakex_orders()  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# RMA rev 3 (R6): the Amazon report loads + AU-IB price snapshot happen before
+# (and independent of) the merged-feed guard; a save failure never blocks
+# Shopify pricing; a failed report load still aborts pricing as before.
+# ---------------------------------------------------------------------------
+def _patch_upload_rv(monkeypatch, amazon_exc=None, save_exc=None, snap_fails=False):
+    import pandas
+    calls = []
+    snap = pandas.DataFrame({"x": [1]})
+    monkeypatch.setattr(main_mod.shopify_client, "ShopifyClient", lambda s: object())
+    monkeypatch.setattr(main_mod.db_mod, "Db", lambda s: object())
+    def fetch(c, s):
+        if snap_fails:
+            raise RuntimeError("shopify down")
+        return snap
+
+    monkeypatch.setattr(main_mod.snapshot_mod, "fetch_snapshot", fetch)
+    monkeypatch.setattr(main_mod, "_enforce_tracking", lambda c, s, sn: None)
+    def pull(c, d, s, sn):
+        calls.append("orders")
+        return {"inserted": 0, "skipped": 0, "errors": 0}
+
+    monkeypatch.setattr(main_mod.orders_mod, "pull_open_orders", pull)
+
+    def load_amazon(settings):
+        calls.append("amazon")
+        if amazon_exc:
+            raise amazon_exc
+        return "amazon_df"
+
+    def save(db, df, ts, dry_run=False):
+        calls.append("save")
+        if save_exc:
+            raise save_exc
+
+    def feed(db):
+        calls.append("feed")
+        raise main_mod.GuardError("feed not ready")
+
+    monkeypatch.setattr(main_mod.sources, "load_amazon_report", load_amazon)
+    monkeypatch.setattr(main_mod.sources, "amazon_report_mtime", lambda s: "ts")
+    monkeypatch.setattr(main_mod.sources, "save_amazon_ib_prices", save)
+    monkeypatch.setattr(main_mod.sources, "load_merged_feed", feed)
+    return calls
+
+
+def test_amazon_prices_saved_even_when_merged_feed_guard_aborts(monkeypatch):
+    calls = _patch_upload_rv(monkeypatch)
+    main_mod._upload_rv(types.SimpleNamespace(dry_run=False), False)
+    assert calls == ["orders", "amazon", "save", "feed"]
+
+
+def test_save_failure_does_not_block_pricing_step(monkeypatch):
+    calls = _patch_upload_rv(monkeypatch, save_exc=RuntimeError("db down"))
+    main_mod._upload_rv(types.SimpleNamespace(dry_run=False), False)
+    assert calls == ["orders", "amazon", "save", "feed"]
+
+
+def test_amazon_load_failure_skips_save_and_aborts_pricing(monkeypatch):
+    calls = _patch_upload_rv(monkeypatch, amazon_exc=main_mod.GuardError("no report"))
+    main_mod._upload_rv(types.SimpleNamespace(dry_run=False), False)
+    assert calls == ["orders", "amazon"]
+
+
+def test_report_load_runs_after_orders_and_even_if_snapshot_fails(monkeypatch):
+    calls = _patch_upload_rv(monkeypatch, snap_fails=True)
+    main_mod._upload_rv(types.SimpleNamespace(dry_run=False), False)
+    assert calls == ["orders", "amazon", "save"]

@@ -183,14 +183,38 @@ def _upload_rv(settings, force_breaker):
     except Exception:
         log.exception("pull_open_orders failed")
 
+    # R6 (RMA rev 3): the Amazon report loads after the orders step (so it never delays the snapshot/order pull) and
+    # before the snapshot early-exit, in its own try, so the
+    # AU-IB price snapshot never waits on (or is blocked by) the merged-feed
+    # guard. If this load fails the pricing step below aborts as before.
+    amazon_df = None
+    amazon_exc = None
+    try:
+        amazon_df = sources.load_amazon_report(settings)
+    except GuardError as exc:
+        amazon_exc = exc
+    except Exception:
+        log.exception("amazon report load failed")
+
+    if amazon_df is not None:
+        # Own try/except: a snapshot failure must never block Shopify pricing.
+        try:
+            sources.save_amazon_ib_prices(db, amazon_df, sources.amazon_report_mtime(settings),
+                                          dry_run=settings.dry_run)
+        except Exception:
+            log.exception("save_amazon_ib_prices failed")
+
     if snap is None or snap.empty:
         log.error("skip pricing/push: snapshot step failed or returned 0 variants")
         return
 
     # Step 3: pricing inputs, guarded (R7).
     try:
+        if amazon_df is None:
+            if amazon_exc is not None:
+                raise amazon_exc
+            raise RuntimeError("amazon report not loaded")
         feed_df = sources.load_merged_feed(db)
-        amazon_df = sources.load_amazon_report(settings)
         rma_df = sources.load_rma_sheet(settings)
         restricted_df = sources.load_restricted_skus(db)
         map_df = sources.load_map_list(db)

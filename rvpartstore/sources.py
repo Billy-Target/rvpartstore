@@ -8,7 +8,9 @@ exception type and log+abort.
 """
 
 import logging
+import datetime
 import os
+import re
 import time
 
 import pandas
@@ -115,6 +117,64 @@ def load_amazon_report(settings, download=True):
         return pandas.read_table(path, encoding="utf-8-sig", low_memory=False, converters={"seller-sku": str})
     except Exception:
         return pandas.read_table(path, encoding="ISO-8859-1", low_memory=False, converters={"seller-sku": str})
+
+
+def amazon_report_mtime(settings):
+    """Local-clock datetime of the report file load_amazon_report just used.
+    A fallback to the previous report still reads the same path, so its mtime
+    is that of the file actually used."""
+    return datetime.datetime.fromtimestamp(os.path.getmtime(settings.amazon_report_path))
+
+
+_AU_IB_NEW_SKU = re.compile(r"^AU-IB-(\d+)$")
+
+_AMAZON_IB_PRICE_DELETE = "DELETE FROM inventory.amazon_ib_price"
+_AMAZON_IB_PRICE_INSERT = (
+    "INSERT INTO inventory.amazon_ib_price (upc, sku, price, report_time) VALUES (%s, %s, %s, %s)"
+)
+
+
+def save_amazon_ib_prices(db, amazon_df, report_time, dry_run=False):
+    """Snapshot the Active AU-IB-<upc> (NEW sku only, exact match, price > 0)
+    prices into inventory.amazon_ib_price for the IBS order-placement side.
+    DELETE + INSERT in one transaction. An empty filtered set deletes nothing
+    (guards against a bad report). report_time is the report file's mtime in
+    machine-local time (assumed to be the same clock as the DB's DATETIME).
+    Returns the number of rows saved (0 when skipped / dry run)."""
+    if not {"seller-sku", "price", "status"}.issubset(amazon_df.columns):
+        log.warning("amazon_ib_price: report lacks seller-sku/price/status columns; snapshot not replaced")
+        return 0
+
+    sku = amazon_df["seller-sku"].astype(str).str.strip()
+    upc = sku.str.extract(_AU_IB_NEW_SKU, expand=False)
+    price = pandas.to_numeric(amazon_df["price"], errors="coerce")
+    active = amazon_df["status"].astype(str).str.strip() == "Active"
+    keep = upc.notna() & active & (price > 0)
+
+    rows = []
+    seen = set()
+    for u, s, p in zip(upc[keep], sku[keep], price[keep]):
+        if u in seen:  # upc is the PK; first listing wins
+            continue
+        seen.add(u)
+        rows.append((u, s, round(float(p), 2), report_time))
+
+    if not rows:
+        log.warning("amazon_ib_price: no Active AU-IB-<upc> rows with price > 0 in the report; "
+                    "snapshot not replaced")
+        return 0
+    if dry_run:
+        log.info("dry-run: would replace inventory.amazon_ib_price with %d row(s) (report_time %s)",
+                 len(rows), report_time)
+        return 0
+
+    conn = db.connect()
+    try:
+        db_mod.replace_all_rows(conn, _AMAZON_IB_PRICE_DELETE, _AMAZON_IB_PRICE_INSERT, rows)
+    finally:
+        conn.close()
+    log.info("amazon_ib_price: replaced snapshot with %d row(s) (report_time %s)", len(rows), report_time)
+    return len(rows)
 
 
 def load_rma_sheet(settings):
