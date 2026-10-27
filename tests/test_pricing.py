@@ -218,6 +218,25 @@ def test_r8_rma_only_matches_store_variant_even_though_compareatprice_is_null():
     assert vendor["lowest_vendor"] == "IB"
 
 
+def test_used_rma_skus_in_amazon_report_are_ignored():
+    # 2026-10-27: AU-IB-<upc>-OB/-UE/-UG used skus must neither crash the int UPC cast nor act as
+    # the rma price or the lowest amazon price; the NEW AU-IB-<upc> price still drives the store price
+    amazon = make_amazon_df([
+        {"price": 30.0, "quantity": 5, "seller-sku": "AU-IB-012345678950", "status": "Active"},
+        {"price": 10.0, "quantity": 0, "seller-sku": "AU-IB-012345678950-OB", "status": "Inactive"},
+        {"price": 5.0, "quantity": 3, "seller-sku": "AU-IB-012345678950-UG", "status": "Active"},
+    ])
+    rma_sheet = make_rma_sheet_df([
+        {"UPC": "012345678950", "quantity on hand": "7", "Cost CAD @": 20.0},
+    ])
+    store = [make_store_row("P6", "V6", "012345678950", price=55.00, quantity=4, metafield_value="KS")]
+    cs = _compute(store, feed_rows=[_filler_feed_row()], amazon_df=amazon, rma_df=rma_sheet)
+
+    price = _price_row(cs, "V6")
+    assert price["new_price"] == 29.34
+    assert price["compareAtPrice"] == 30.00
+
+
 # ---------------------------------------------------------------------------
 # restricted SKUs
 # ---------------------------------------------------------------------------

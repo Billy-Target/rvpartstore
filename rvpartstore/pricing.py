@@ -296,6 +296,10 @@ def _select_lowest_vendor(upc_items):
     return upc_items
 
 
+# used RMA condition skus, e.g. AU-IB-748354021882-OB (2026-10-27)
+_USED_IB_SKU = r"^AU-IB-\d+-[A-Z]+$"
+
+
 def _filter_amazon_repricer_pass1(amazon_df):
     """Old lines 631-633: first filter pass on the raw report."""
     repricer = amazon_df.copy()
@@ -318,6 +322,8 @@ def _filter_amazon_repricer_pass2(repricer):
     repricer["my_price"] = repricer["price"]
     repricer["first_two"] = repricer["sku"].str.slice(start=0, stop=2)
     repricer = repricer.loc[repricer["first_two"].isin(["AU", "MP", "PS"])]
+    # used RMA skus (AU-IB-<upc>-OB/-UE/-UG) are a different condition, their price must not set the store price
+    repricer = repricer.loc[~repricer["sku"].str.match(_USED_IB_SKU)]
     repricer["upc"] = repricer["sku"].str.split("-").str[2]
 
     counts = repricer.groupby(["upc"])["quantity"].agg("sum").reset_index()
@@ -359,6 +365,8 @@ def compute_changes(in_store_df, feed_df, amazon_df, rma_sheet_df, restricted_df
     ib_file.columns = ["sku", "my_price"]
     ib_file["second_two"] = ib_file["sku"].str.slice(start=3, stop=5)
     ib_file = ib_file.loc[ib_file["second_two"] == "IB"]
+    # NEW AU-IB-<upc> only: a used sku (AU-IB-<upc>-OB) would crash the int cast and is not the rma price
+    ib_file = ib_file.loc[ib_file["sku"].str.match(r"^..-IB-\d+$")]
     ib_file["int_UPC"] = ib_file["sku"].str.slice(start=6).astype("int64")
 
     # ---- RMA google sheet (old 643-651) ----
