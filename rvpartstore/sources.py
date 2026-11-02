@@ -128,9 +128,15 @@ def amazon_report_mtime(settings):
 
 _AU_IB_NEW_SKU = re.compile(r"^AU-IB-(\d+)$")
 
+_AU_IB_USED_SKU = re.compile(r"^AU-IB-([0-9]+)-(OB|UE|UG)$")
+
 _AMAZON_IB_PRICE_DELETE = "DELETE FROM inventory.amazon_ib_price"
 _AMAZON_IB_PRICE_INSERT = (
     "INSERT INTO inventory.amazon_ib_price (upc, sku, price, report_time) VALUES (%s, %s, %s, %s)"
+)
+_AMAZON_IB_USED_PRICE_DELETE = "DELETE FROM inventory.amazon_ib_used_price"
+_AMAZON_IB_USED_PRICE_INSERT = (
+    "INSERT INTO inventory.amazon_ib_used_price (upc, grade, sku, price, report_time) VALUES (%s, %s, %s, %s, %s)"
 )
 
 
@@ -140,7 +146,15 @@ def save_amazon_ib_prices(db, amazon_df, report_time, dry_run=False):
     DELETE + INSERT in one transaction. An empty filtered set deletes nothing
     (guards against a bad report). report_time is the report file's mtime in
     machine-local time (assumed to be the same clock as the DB's DATETIME).
-    Returns the number of rows saved (0 when skipped / dry run)."""
+
+    The Active AU-IB-<upc>-OB/-UE/-UG (used sku, exact match, price > 0, first
+    listing per (upc, grade)) prices go into inventory.amazon_ib_used_price the
+    same way. The NEW-rows guard decides for both tables: no NEW rows -> neither
+    is replaced. An empty used set is valid and empties the used table (no used
+    sku is Active). The used table is written FIRST, in its own transaction, so
+    a used snapshot is never older than the NEW one of the same run; a failed
+    used write is logged and does not stop the NEW snapshot.
+    Returns the number of NEW rows saved (0 when skipped / dry run)."""
     if not {"seller-sku", "price", "status"}.issubset(amazon_df.columns):
         log.warning("amazon_ib_price: report lacks seller-sku/price/status columns; snapshot not replaced")
         return 0
@@ -159,14 +173,40 @@ def save_amazon_ib_prices(db, amazon_df, report_time, dry_run=False):
         seen.add(u)
         rows.append((u, s, round(float(p), 2), report_time))
 
+    used_rows = []
+    used_seen = set()
+    for s, p in zip(sku[active & (price > 0)], price[active & (price > 0)]):
+        match = _AU_IB_USED_SKU.fullmatch(s)
+        if not match:
+            continue
+        key = (match.group(1), match.group(2))
+        if key in used_seen:  # (upc, grade) is the PK; first listing wins
+            continue
+        used_seen.add(key)
+        used_rows.append((key[0], key[1], s, round(float(p), 2), report_time))
+
     if not rows:
         log.warning("amazon_ib_price: no Active AU-IB-<upc> rows with price > 0 in the report; "
                     "snapshot not replaced")
         return 0
     if dry_run:
-        log.info("dry-run: would replace inventory.amazon_ib_price with %d row(s) (report_time %s)",
-                 len(rows), report_time)
+        log.info("dry-run: would replace inventory.amazon_ib_price with %d row(s) and "
+                 "inventory.amazon_ib_used_price with %d row(s) (report_time %s)",
+                 len(rows), len(used_rows), report_time)
         return 0
+
+    # used first: if it fails the NEW snapshot still goes in (e.g. used table not created yet), and a used
+    # snapshot is then older than the NEW one, which the IBS reader ignores
+    try:
+        conn = db.connect()
+        try:
+            db_mod.replace_all_rows(conn, _AMAZON_IB_USED_PRICE_DELETE, _AMAZON_IB_USED_PRICE_INSERT, used_rows)
+        finally:
+            conn.close()
+        log.info("amazon_ib_used_price: replaced snapshot with %d row(s) (report_time %s)",
+                 len(used_rows), report_time)
+    except Exception:
+        log.exception("amazon_ib_used_price: used snapshot write failed; NEW snapshot continues")
 
     conn = db.connect()
     try:
